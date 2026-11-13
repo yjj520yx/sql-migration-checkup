@@ -31,6 +31,8 @@ var SAMPLES = [
       'SELECT e.emp_name,',
       '       NVL(e.salary, 0) AS salary,',
       "       DECODE(e.dept_name, '研发', 'R&D', '销售', 'SALES', 'OTHER') AS dept_code,",
+      '       NVL2(e.bonus, e.bonus, 0) AS bonus,',
+      "       NVL(TRIM(e.emp_name), '未知') AS emp_name2,",
       "       TO_DATE('2025-01-01 08:30:00', 'YYYY-MM-DD HH24:MI:SS') AS stat_time",
       '  FROM dm_emp e',
       " WHERE e.hire_date >= TO_DATE('2024-01-01', 'YYYY-MM-DD')",

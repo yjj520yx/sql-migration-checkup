@@ -54,7 +54,173 @@ var SqlUtil = (function () {
     return false;
   }
 
-  return { readCall: readCall, hasSubquery: hasSubquery };
+  // 取 index 所在的整条语句（以分号切分，去掉语句前的整行注释）
+  function statementAt(text, index) {
+    var start = text.lastIndexOf(';', index);
+    start = start < 0 ? 0 : start + 1;
+    var end = text.indexOf(';', index);
+    end = end < 0 ? text.length : end;
+    return text.slice(start, end).replace(/^(?:[ \t]*(?:#[^\n]*|--[^\n]*)\n)+/, '');
+  }
+
+  // 按顶层逗号切分（忽略括号与引号内的逗号）
+  function splitTop(str) {
+    var out = [], depth = 0, cur = '', q = '';
+    for (var i = 0; i < str.length; i++) {
+      var ch = str[i];
+      if (q) {
+        cur += ch;
+        if (ch === q) { if (str[i + 1] === q) { cur += str[i + 1]; i++; } else q = ''; }
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { q = ch; cur += ch; continue; }
+      if (ch === '(') { depth++; cur += ch; continue; }
+      if (ch === ')') { depth--; cur += ch; continue; }
+      if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    if (cur.trim() !== '') out.push(cur.trim());
+    return out;
+  }
+
+  // 按顶层 AND 切分条件
+  function splitAnd(str) {
+    var parts = [], depth = 0, q = '', cur = '';
+    for (var i = 0; i < str.length; i++) {
+      var ch = str[i];
+      if (q) {
+        cur += ch;
+        if (ch === q) { if (str[i + 1] === q) { cur += str[i + 1]; i++; } else q = ''; }
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { q = ch; cur += ch; continue; }
+      if (ch === '(') { depth++; cur += ch; continue; }
+      if (ch === ')') { depth--; cur += ch; continue; }
+      if (depth === 0 && /[A-Za-z]/.test(ch) && /\s/.test(str[i - 1] || '')) {
+        var word = /^[A-Za-z]+/.exec(str.slice(i));
+        if (word && /^and$/i.test(word[0]) && /\s/.test(str[i + word[0].length] || '')) {
+          if (cur.trim()) parts.push(cur.trim());
+          cur = '';
+          i += word[0].length - 1;
+          continue;
+        }
+      }
+      cur += ch;
+    }
+    if (cur.trim()) parts.push(cur.trim());
+    return parts;
+  }
+
+  function aliasOf(t) {
+    var p = t.trim().split(/\s+/);
+    return p.length > 1 ? p[p.length - 1] : p[0];
+  }
+
+  // ROWNUM 分页 → LIMIT/OFFSET 建议
+  function suggestRownum(stmt) {
+    var outer = /\)\s*(?:[A-Za-z0-9_$#]+)?\s*WHERE\s+([A-Za-z0-9_$#]+)\s*>\s*(\d+)/i.exec(stmt);
+    var inner = /ROWNUM\s*<=\s*(\d+)/i.exec(stmt);
+    if (inner && outer && +inner[1] > +outer[2]) {
+      return 'LIMIT ' + (+inner[1] - +outer[2]) + ' OFFSET ' + outer[2] +
+        '\n-- 替换整段嵌套分页（原 WHERE ROWNUM <= ' + inner[1] + ' + 外层 ' + outer[1] + ' > ' + outer[2] + '）';
+    }
+    var le = /ROWNUM\s*<=\s*(\d+)/i.exec(stmt);
+    if (le) {
+      return 'LIMIT ' + le[1] + '\n-- 替换 WHERE ROWNUM <= ' + le[1] + '；原有 ORDER BY 必须保留在 LIMIT 之前';
+    }
+    var lt = /ROWNUM\s*<\s*(\d+)/i.exec(stmt);
+    if (lt) {
+      return 'LIMIT ' + (+lt[1] - 1) + '\n-- ROWNUM < ' + lt[1] + ' 等价于取前 ' + (+lt[1] - 1) + ' 行';
+    }
+    return 'LIMIT n [OFFSET m]\n-- 按分页意图重写，ORDER BY 保留在 LIMIT 之前';
+  }
+
+  // (+) 外连接 → ANSI JOIN 建议（仅两表、条件可用 AND 切开时给出完整语句）
+  function suggestAnsiJoin(stmt) {
+    var fm = /\bFROM\b/i.exec(stmt);
+    if (!fm) return null;
+    var fromIdx = fm.index;
+    var wm = /\bWHERE\b/i.exec(stmt.slice(fromIdx));
+    if (!wm) return null;
+    var whereIdx = fromIdx + wm.index;
+    var head = stmt.slice(0, fromIdx);
+    var fromPart = stmt.slice(fromIdx + 4, whereIdx).trim();
+    var wherePart = stmt.slice(whereIdx + 5).trim().replace(/;\s*$/, '');
+    var tables = splitTop(fromPart);
+    if (tables.length !== 2) return null;
+    var conds = splitAnd(wherePart);
+    var plusAlias = null;
+    for (var i = 0; i < conds.length; i++) {
+      var pm = /([A-Za-z0-9_$#]+)\s*\.\s*[A-Za-z0-9_$#]+\s*\(\s*\+\s*\)/.exec(conds[i]);
+      if (pm) plusAlias = pm[1];
+    }
+    if (!plusAlias) return null;
+    var inner = null, outer = null;
+    for (var t = 0; t < tables.length; t++) {
+      if (aliasOf(tables[t]) === plusAlias) inner = tables[t]; else outer = tables[t];
+    }
+    if (!inner || !outer) return null;
+    var join = [], rest = [];
+    for (var c = 0; c < conds.length; c++) {
+      if (/\(\s*\+\s*\)/.test(conds[c])) join.push(conds[c].replace(/\s*\(\s*\+\s*\)/g, ''));
+      else rest.push(conds[c]);
+    }
+    if (!join.length) return null;
+    var out = head + 'FROM ' + outer + '\n  LEFT JOIN ' + inner + '\n    ON ' + join.join('\n   AND ');
+    if (rest.length) out += '\n WHERE ' + rest.join('\n   AND ');
+    return out;
+  }
+
+  // INSERT ... ON DUPLICATE KEY UPDATE / INSERT IGNORE → MERGE 建议
+  function suggestMerge(stmt, mode) {
+    var im = /\bINSERT\s+(?:IGNORE\s+)?INTO\s+([A-Za-z0-9_$#."]+)\s*\(/i.exec(stmt);
+    if (!im) return null;
+    var table = im[1];
+    var colOpen = stmt.indexOf('(', im.index + im[0].length - 1);
+    var colCall = readCall(stmt, colOpen);
+    if (!colCall) return null;
+    var cols = colCall.args;
+    var vIdx = stmt.toUpperCase().indexOf('VALUES', colCall.end);
+    if (vIdx < 0) return null;
+    var vOpen = stmt.indexOf('(', vIdx);
+    var vCall = readCall(stmt, vOpen);
+    if (!vCall) return null;
+    var vals = vCall.args;
+    if (vals.length !== cols.length) return null;
+
+    var head = 'MERGE INTO ' + table + ' AS tgt\nUSING (SELECT ' +
+      vals.map(function (v, i) { return v + ' AS ' + cols[i]; }).join(', ') + ' FROM DUAL) src\n' +
+      '  ON (tgt.<唯一键> = src.<唯一键>)\n';
+    var ins = '  WHEN NOT MATCHED THEN INSERT (' + cols.join(', ') + ') VALUES (' +
+      cols.map(function (c) { return 'src.' + c; }).join(', ') + ')';
+
+    if (mode === 'ignore') return head + ins + ';';
+
+    var rest = stmt.slice(vCall.end);
+    var um = /\bON\s+DUPLICATE\s+KEY\s+UPDATE\s*([\s\S]*)$/i.exec(rest);
+    if (!um) return head + ins + ';';
+    var sets = splitTop(um[1]).map(function (pair) {
+      var eq = pair.indexOf('=');
+      if (eq < 0) return null;
+      var lhs = pair.slice(0, eq).trim();
+      var rhs = pair.slice(eq + 1).trim().replace(/\bVALUES\s*\(\s*([A-Za-z0-9_$#.]+)\s*\)/gi, 'src.$1');
+      var col = lhs.replace(/^[A-Za-z0-9_$#]+\./, '');
+      rhs = rhs.replace(new RegExp('(^|[^.A-Za-z0-9_$#])' + col.replace(/[$#]/g, '\\$&') + '\\b', 'g'), '$1src.' + col);
+      return 'tgt.' + col + ' = ' + rhs;
+    }).filter(Boolean);
+    if (!sets.length) return head + ins + ';';
+    return head + '  WHEN MATCHED THEN UPDATE SET ' + sets.join(',\n    ') + '\n' + ins + ';';
+  }
+
+  return {
+    readCall: readCall,
+    hasSubquery: hasSubquery,
+    statementAt: statementAt,
+    splitTop: splitTop,
+    suggestRownum: suggestRownum,
+    suggestAnsiJoin: suggestAnsiJoin,
+    suggestMerge: suggestMerge
+  };
 })();
 
 var RULES = [
@@ -156,6 +322,48 @@ var RULES = [
     confirm: false
   },
   {
+    id: 'ORA-NVL-NESTED',
+    name: 'NVL 参数含函数嵌套 → IFNULL',
+    dirs: ['oracle'],
+    kind: 'advice',
+    risk: 'medium',
+    offer: true,
+    regex: /\bNVL\s*\(/gi,
+    suggest: function (m, text) {
+      var open = text.indexOf('(', m.index);
+      var call = open < 0 ? null : SqlUtil.readCall(text, open);
+      if (!call || call.args.length !== 2) return null;
+      return {
+        before: text.slice(m.index, call.end),
+        after: 'IFNULL(' + call.args[0] + ', ' + call.args[1] + ')'
+      };
+    },
+    why: '参数里带 TO_CHAR、TRIM、CASE 等嵌套时，简单正则不敢直接替换（会把括号截断），这里用括号配对读出完整参数，给出可整段替换的 IFNULL 写法。',
+    note: 'NVL 会用第二个参数的类型做隐式转换（例如 NVL(日期列, 字符串)），IFNULL 的类型推导与比较规则可能不同；若第二参数是常量字符串，替换后要确认返回类型、排序与后续比较结果都没变。',
+    confirm: true
+  },
+  {
+    id: 'ORA-NVL2',
+    name: 'NVL2(a,b,c) → CASE WHEN',
+    dirs: ['oracle'],
+    kind: 'advice',
+    risk: 'medium',
+    offer: true,
+    regex: /\bNVL2\s*\(/gi,
+    suggest: function (m, text) {
+      var open = text.indexOf('(', m.index);
+      var call = open < 0 ? null : SqlUtil.readCall(text, open);
+      if (!call || call.args.length !== 3) return null;
+      return {
+        before: text.slice(m.index, call.end),
+        after: 'CASE WHEN ' + call.args[0] + ' IS NOT NULL THEN ' + call.args[1] + ' ELSE ' + call.args[2] + ' END'
+      };
+    },
+    why: '达梦没有 NVL2。它的语义是"第一参数非空取第二参数，否则取第三参数"，用 CASE WHEN 可以一对一表达，不需要函数替代。',
+    note: 'Oracle 会把 b、c 两个分支的类型做隐式统一，CASE 则按分支各自推导再合并；若两个分支类型不同（如数字与字符串），替换后可能报类型错误或结果被截断，必须核对返回类型。',
+    confirm: true
+  },
+  {
     id: 'ORA-DECODE',
     name: 'DECODE(...) → CASE WHEN',
     dirs: ['oracle'],
@@ -179,7 +387,24 @@ var RULES = [
     },
     why: '达梦支持 DECODE，但 CASE WHEN 是标准 SQL，行为等价且更易读。',
     note: 'DECODE 把两个 NULL 视为相等，CASE 的 NULL 比较会得到 UNKNOWN。若参与比较的列可能为 NULL，结果会不同，必须人工确认。',
-    confirm: true
+    confirm: true,
+    // 正则改写不敢动的情况（参数含子查询等）：不静默跳过，改为给出建议写法
+    alt: function (m, text) {
+      var open = text.indexOf('(', m.index);
+      var call = open < 0 ? null : SqlUtil.readCall(text, open);
+      if (!call || call.args.length < 3) return null;
+      var args = call.args, whens = [], i;
+      for (i = 1; i + 1 < args.length; i += 2) {
+        whens.push('WHEN ' + args[i] + ' THEN ' + args[i + 1]);
+      }
+      var def = ((args.length - 1) % 2 === 1) ? args[args.length - 1] : null;
+      return {
+        before: text.slice(m.index, call.end),
+        after: 'CASE ' + args[0] + ' ' + whens.join(' ') + (def !== null ? ' ELSE ' + def : '') + ' END'
+      };
+    },
+    altWhy: 'DECODE 的参数里含子查询或复杂表达式，按正则直接替换容易截断括号，这里用括号配对读出完整参数，给出等价的 CASE WHEN 供整段替换。',
+    altNote: 'DECODE 把两个 NULL 当作相等，CASE 的 NULL 比较结果是 UNKNOWN；只要参与比较的表达式可能为 NULL，改写后就会落到 ELSE 分支，结果不同。'
   },
   {
     id: 'ORA-TO-DATE',
@@ -199,10 +424,16 @@ var RULES = [
     dirs: ['oracle'],
     kind: 'advice',
     risk: 'medium',
+    offer: true,
     regex: /\bROWNUM\b/gi,
-    suggest: 'WHERE ROWNUM <= 20 → LIMIT 20；区间分页 → LIMIT n OFFSET m（需结合 ORDER BY 重写）',
-    why: '达梦兼容 ROWNUM，原写法通常可以直接运行；但标准分页写法更清晰，也不依赖 Oracle 兼容模式。',
-    note: 'ROWNUM 与 ORDER BY 的执行顺序在嵌套子查询里容易出错，改写分页时必须连同排序一起确认。',
+    suggest: function (m, text) {
+      var stmt = SqlUtil.statementAt(text, m.index);
+      var after = SqlUtil.suggestRownum(stmt);
+      var bm = /ROWNUM\s*(?:<=|<)\s*\d+/i.exec(stmt);
+      return { before: bm ? bm[0] : m[0], after: after };
+    },
+    why: '达梦兼容 ROWNUM，原写法通常能直接跑；给出 LIMIT/OFFSET 建议，是为了去掉对 Oracle 兼容模式的依赖，并让分页意图写在语句里。',
+    note: '分页行号依赖 ORDER BY 与 ROWNUM 的求值时机。原语句若没有唯一排序键，LIMIT 与 ROWNUM 在"并列行谁先出现"上不保证一致；嵌套分页的起止偏移还需要按业务页码换算。工具只给建议，不替换输出。',
     confirm: true
   },
   {
@@ -211,10 +442,18 @@ var RULES = [
     dirs: ['oracle'],
     kind: 'advice',
     risk: 'high',
+    offer: true,
     regex: /\(\s*\+\s*\)/g,
-    suggest: 'FROM a, b WHERE a.id = b.a_id(+) → FROM a LEFT JOIN b ON a.id = b.a_id',
-    why: '达梦只兼容部分 (+) 写法，多表混合、带 OR 条件时行为容易出错。改为 ANSI JOIN 后语义明确。',
-    note: '无法从片段判断应该 LEFT 还是 RIGHT，也无法判断连接条件边界，必须人工改写并核对结果行数。',
+    suggest: function (m, text) {
+      var stmt = SqlUtil.statementAt(text, m.index).trim();
+      var s = SqlUtil.suggestAnsiJoin(stmt);
+      return {
+        before: stmt,
+        after: s || 'FROM a, b WHERE a.id = b.a_id(+) → FROM a LEFT JOIN b ON a.id = b.a_id（多表/带 OR 时请手工改写）'
+      };
+    },
+    why: '达梦只兼容部分 (+) 写法，多表混合、条件里带 OR 时行为容易跑偏。ANSI JOIN 的"保留哪一侧"写在语法里，读和审都更明确。',
+    note: '(+) 标在哪张表，决定谁是保留侧；一个表上有多个 (+) 条件、或 WHERE 里混有过滤条件时，哪些条件进 ON、哪些留在 WHERE 会改变结果集。工具给的是两表、条件能用 AND 切开时的建议稿，行数与空值行必须实测比对。',
     confirm: true
   },
   {
@@ -602,10 +841,16 @@ var RULES = [
     dirs: ['mysql'],
     kind: 'advice',
     risk: 'high',
+    offer: true,
     regex: /\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/gi,
-    suggest: '改 MERGE INTO t USING (VALUES ...) ON (唯一键) WHEN MATCHED THEN UPDATE ...',
-    why: '这是 MySQL 专有语法，达梦不支持，不能靠替换关键字解决。',
-    note: 'MERGE 的并发行为与原语法不同（可能死锁或覆盖），必须在事务里压测。',
+    suggest: function (m, text) {
+      var stmt = SqlUtil.statementAt(text, m.index).trim();
+      var s = SqlUtil.suggestMerge(stmt, 'update');
+      if (!s) return null;
+      return { before: stmt, after: s };
+    },
+    why: '这是 MySQL 专有语法，达梦不支持，也不能靠换关键字解决。"存在则更新、不存在则插入"在达梦里对应 MERGE，把源数据写成 USING 子查询即可一对一表达。',
+    note: 'MERGE 的 ON 只能写你指定的唯一键，而 MySQL 的冲突判定是"任一唯一索引命中"，两者的冲突口径可能不同；此外 VALUES(col) 引用、自增列取值、触发器触发次数、影响行数统计都不一样，必须在事务里压测后再替换。',
     confirm: true
   },
   {
@@ -614,10 +859,16 @@ var RULES = [
     dirs: ['mysql'],
     kind: 'advice',
     risk: 'high',
+    offer: true,
     regex: /\bINSERT\s+IGNORE\b/gi,
-    suggest: '改 MERGE INTO ... WHEN NOT MATCHED THEN INSERT，或捕获唯一键异常',
-    why: '达梦没有 INSERT IGNORE，"忽略冲突"的语义要靠 MERGE 或应用层异常处理实现。',
-    note: '原语法会忽略所有可忽略错误（不只唯一键），迁移后错误范围会变窄。',
+    suggest: function (m, text) {
+      var stmt = SqlUtil.statementAt(text, m.index).trim();
+      var s = SqlUtil.suggestMerge(stmt, 'ignore');
+      if (!s) return null;
+      return { before: stmt, after: s };
+    },
+    why: '达梦没有 INSERT IGNORE，"冲突就跳过"要用 MERGE 的 WHEN NOT MATCHED 分支表达，或者在应用层捕获唯一键异常。',
+    note: 'INSERT IGNORE 会忽略所有"可忽略"的错误（唯一键、非空、外键、数据截断都算），而 MERGE 只跳过唯一键冲突，其余错误会直接抛出；若原业务依赖"截断也继续插"，替换后行为会变。',
     confirm: true
   },
   {

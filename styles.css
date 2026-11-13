@@ -212,6 +212,9 @@ button.mini {
   background: #f1f4f2; color: var(--ink-2);
 }
 .tag.confirm { background: #fff4e0; color: #a15c00; }
+.tag.offer { background: #e8f0ff; color: #1d4ed8; }
+.issue-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.issue-cap { font-size: 11.5px; color: var(--ink-3); }
 .issue-line { font-size: 12px; color: var(--ink-3); }
 .issue-code {
   display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0;

@@ -26,8 +26,8 @@
     return line;
   }
 
-  function pushIssue(issues, rule, text, index, before, after) {
-    issues.push({
+  function pushIssue(issues, rule, text, index, before, after, extra) {
+    var it = {
       ruleId: rule.id,
       name: rule.name,
       kind: rule.kind,
@@ -37,8 +37,11 @@
       after: after,
       why: rule.why,
       note: rule.note,
-      confirm: !!rule.confirm
-    });
+      confirm: !!rule.confirm,
+      offer: !!rule.offer
+    };
+    if (extra) for (var k in extra) it[k] = extra[k];
+    issues.push(it);
   }
 
   function applyRewrite(rule, text, issues) {
@@ -48,7 +51,21 @@
     while ((m = re.exec(text)) !== null) {
       if (++guard > 5000) break;
       var built = rule.build ? rule.build(m, text) : m[0];
-      if (built == null) { if (m[0].length === 0) re.lastIndex++; continue; }
+      if (built == null) {
+        // 改写规则主动放弃时，若带 alt，则给出建议写法（不应用到输出）
+        if (rule.alt) {
+          var alt = null;
+          try { alt = rule.alt(m, text); } catch (e2) { alt = null; }
+          if (alt) {
+            var altAfter = alt, altBefore = m[0];
+            if (typeof alt === 'object') { altAfter = alt.after; altBefore = alt.before || m[0]; }
+            pushIssue(issues, rule, text, m.index, altBefore, altAfter,
+              { kind: 'advice', offer: true, why: rule.altWhy || rule.why, note: rule.altNote || rule.note, confirm: true });
+          }
+        }
+        if (m[0].length === 0) re.lastIndex++;
+        continue;
+      }
       if (typeof built === 'string') built = { after: built, end: m.index + m[0].length };
       var end = (built.end == null) ? m.index + m[0].length : built.end;
       if (end <= last || end <= m.index) { if (m[0].length === 0) re.lastIndex++; continue; }
@@ -90,7 +107,14 @@
     var m, count = 0;
     while ((m = re.exec(text)) !== null) {
       if (m[0].length === 0) { re.lastIndex++; continue; }
-      pushIssue(issues, rule, text, m.index, m[0], rule.suggest || '（保持原写法，需人工确认）');
+      var sug = rule.suggest;
+      if (typeof sug === 'function') {
+        try { sug = sug(m, text); } catch (e) { sug = null; }
+      }
+      var after = sug, before = m[0];
+      if (sug && typeof sug === 'object') { after = sug.after; before = sug.before || m[0]; }
+      pushIssue(issues, rule, text, m.index, before, after || '（保持原写法，需人工确认）',
+        { offer: !!rule.offer && !!after });
       if (++count >= 30) break;
     }
     return text;
@@ -99,7 +123,7 @@
   function convert(sql, dir) {
     var text = normalize(sql);
     if (text.length > 200000) {
-      return { ok: false, error: 'SQL 超过 20 万字符，请拆分后再试。', output: text, issues: [], stats: { high: 0, medium: 0, low: 0, total: 0 }, elapsed: 0 };
+      return { ok: false, error: 'SQL 超过 20 万字符，请拆分后再试。', output: text, issues: [], stats: { high: 0, medium: 0, low: 0, total: 0, offered: 0 }, elapsed: 0 };
     }
     var start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     var issues = [];
@@ -122,8 +146,11 @@
       return a.line - b.line || RISK_WEIGHT[b.risk] - RISK_WEIGHT[a.risk];
     });
 
-    var stats = { high: 0, medium: 0, low: 0, total: issues.length };
-    for (var j = 0; j < issues.length; j++) stats[issues[j].risk]++;
+    var stats = { high: 0, medium: 0, low: 0, total: issues.length, offered: 0 };
+    for (var j = 0; j < issues.length; j++) {
+      stats[issues[j].risk]++;
+      if (issues[j].offer) stats.offered++;
+    }
 
     var end = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     return {
@@ -259,6 +286,9 @@
     lines.push('- 原始字符数：' + input.length);
     lines.push('- 改写后字符数：' + result.output.length);
     lines.push('- 问题统计：高危 ' + s.high + ' · 中危 ' + s.medium + ' · 低危 ' + s.low + ' · 合计 ' + s.total);
+    if (s.offered) {
+      lines.push('- 给出建议写法：' + s.offered + ' 处（未自动应用，需人工确认后替换）');
+    }
     lines.push('');
     lines.push('## 一、原始 SQL');
     lines.push('');
@@ -288,8 +318,37 @@
           (it.note ? '<br>风险说明：' + mdCell(it.note) : '') + ' | ' + (it.confirm ? '是' : '否') + ' |');
       }
     }
+    var offered = result.issues.filter(function (x) { return x.offer; });
+    if (offered.length) {
+      lines.push('');
+      lines.push('## 四、建议改写（未自动应用，需人工确认）');
+      lines.push('');
+      lines.push('以下写法工具**没有**自动替换到「改写后的 SQL」里：语义能否等价取决于数据与业务规则，需要人工确认后再手工替换。');
+      lines.push('');
+      for (var k = 0; k < offered.length; k++) {
+        var o = offered[k];
+        lines.push('### ' + (k + 1) + '. ' + o.name + '（第 ' + o.line + ' 行，' + (o.risk === 'high' ? '高危' : o.risk === 'medium' ? '中危' : '低危') + '）');
+        lines.push('');
+        lines.push('**原写法**');
+        lines.push('');
+        lines.push('```sql');
+        lines.push(o.before);
+        lines.push('```');
+        lines.push('');
+        lines.push('**建议写法**');
+        lines.push('');
+        lines.push('```sql');
+        lines.push(o.after);
+        lines.push('```');
+        lines.push('');
+        lines.push('**为什么这样建议**：' + o.why);
+        lines.push('');
+        lines.push('**为什么必须人工确认**：' + (o.note || '工具的改写不保证语义等价。'));
+        lines.push('');
+      }
+    }
     lines.push('');
-    lines.push('## 四、已知限制');
+    lines.push('## ' + (offered.length ? '五' : '四') + '、已知限制');
     lines.push('');
     lines.push('- 本工具不连接数据库、不执行 SQL，结果不能替代目标达梦库上的实测。');
     lines.push('- 不保证语义完全等价，尤其是日期精度、字符长度、NULL 处理、分页顺序。');
@@ -316,7 +375,7 @@
       return c;
     },
     rules: RULESET,
-    version: 'v1.0'
+    version: 'v1.1'
   };
 
   root.Converter = Converter;

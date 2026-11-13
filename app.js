@@ -199,20 +199,28 @@
     var html = '';
     for (var i = 0; i < list.length; i++) {
       var it = list[i];
+      var capRight = it.kind === 'rewrite'
+        ? '改后（已应用）'
+        : (it.offer ? '建议写法（未自动应用）' : '建议 / 处理方式');
       html += '<div class="issue">' +
         '<div class="issue-top">' +
           '<span class="risk ' + it.risk + '">' + riskLabel(it.risk) + '</span>' +
           '<span class="issue-name">' + Converter.escapeHtml(it.name) +
             (it.count > 1 ? '（共 ' + it.count + ' 处）' : '') + '</span>' +
+          (it.offer ? '<span class="tag offer">建议改写</span>' : '') +
           (it.confirm ? '<span class="tag confirm">需人工确认</span>' : '<span class="tag">可直接改写</span>') +
           '<span class="issue-line">第 ' + it.line + ' 行</span>' +
         '</div>' +
         '<div class="issue-code">' +
-          '<pre class="before">' + (it.before ? Converter.escapeHtml(it.before) : '（无原文）') + '</pre>' +
-          '<pre class="after">' + (it.after ? Converter.escapeHtml(it.after) : '（移除该写法）') + '</pre>' +
+          '<div class="issue-cell"><span class="issue-cap">原写法</span>' +
+            '<pre class="before">' + (it.before ? Converter.escapeHtml(it.before) : '（无原文）') + '</pre></div>' +
+          '<div class="issue-cell"><span class="issue-cap">' + capRight + '</span>' +
+            '<pre class="after">' + (it.after ? Converter.escapeHtml(it.after) : '（移除该写法）') + '</pre></div>' +
         '</div>' +
-        '<p class="issue-why"><b>为什么：</b>' + Converter.escapeHtml(it.why) +
-          (it.note ? '<br><b>风险说明：</b>' + Converter.escapeHtml(it.note) : '') + '</p>' +
+        '<p class="issue-why"><b>' + (it.kind === 'rewrite' ? '为什么改：' : '为什么这样建议：') + '</b>' +
+          Converter.escapeHtml(it.why) +
+          (it.note ? '<br><b>' + (it.confirm ? '为什么必须人工确认：' : '风险说明：') + '</b>' +
+            Converter.escapeHtml(it.note) : '') + '</p>' +
       '</div>';
     }
     els.issueList.innerHTML = html;

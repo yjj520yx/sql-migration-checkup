@@ -95,8 +95,8 @@
         <p>把<strong>语义确定、写法可替换</strong>的部分直接改掉，例如 <code>VARCHAR2</code> → <code>VARCHAR</code>、<code>LIMIT 100,20</code> → <code>LIMIT 20 OFFSET 100</code>。</p>
       </div>
       <div>
-        <h3>仅提示不硬改</h3>
-        <p>拿不准的<strong>只标注「需人工确认」并给建议</strong>，例如 <code>(+)</code> 外连接、<code>ON DUPLICATE KEY UPDATE</code>、<code>ENUM</code>。宁可少改，也不改错。</p>
+        <h3>建议改写，不自动应用</h3>
+        <p>拿不准的<strong>给出建议写法、标「需人工确认」，但不写进输出</strong>，例如 <code>(+)</code> 外连接、<code>ROWNUM</code> 分页、<code>ON DUPLICATE KEY UPDATE</code>、<code>ENUM</code>。宁可少改，也不改错。</p>
       </div>
       <div>
         <h3>风险分级</h3>

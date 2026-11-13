@@ -4,6 +4,9 @@
 
 纯前端静态站点：不连数据库、不执行 SQL、不上传任何内容。
 
+- 线上地址：https://37jf4e4l7ixbzw2ksvt.traesite.cn/
+- 当前版本：v1.1（49 条规则 = Oracle 24 + MySQL 25；其中 6 类高频写法给「建议改写」但不自动应用）
+
 ## 本地打开
 
 - 直接双击 `index.html` 即可（无需 Node、无需构建、无需联网）。
@@ -47,16 +50,30 @@
 要点：
 
 1. `kind: 'advice'` 的规则不改写，只记录问题，用 `suggest` 给建议。
-2. 拿不准就 `return null`，或在规则上标 `confirm: true`，不要硬改写。
-3. 同一个规则命中很多次时，加 `aggregate: true` 会合并成一条「共 N 处」。
-4. 复杂函数（参数不定长）用 `SqlUtil.readCall(sql, openIndex)` 解析括号，不要写贪心正则。
+2. 想让提示规则给出**可整段替换的建议写法**，加 `offer: true`，并把 `suggest` 写成函数：
+   ```js
+   {
+     id: 'ORA-NVL-NESTED',
+     kind: 'advice', offer: true,
+     suggest: function (m, text) {
+       var call = SqlUtil.readCall(text, text.indexOf('(', m.index));
+       if (!call || call.args.length !== 2) return null;
+       return { before: text.slice(m.index, call.end), after: 'IFNULL(' + call.args[0] + ', ' + call.args[1] + ')' };
+     }
+   }
+   ```
+   `offer` 只影响展示与报告：建议写法**不会**写进输出 SQL，界面上标「建议写法（未自动应用）」，需人工确认后自己替换。
+3. 拿不准就 `return null`，或在规则上标 `confirm: true`，不要硬改写。
+4. 同一个规则命中很多次时，加 `aggregate: true` 会合并成一条「共 N 处」。
+5. 复杂函数（参数不定长）用 `SqlUtil.readCall(sql, openIndex)` 解析括号，不要写贪心正则。
+6. 改写规则可以用 `alt(m, text)` 兜底：当 `build` 返回 `null` 时，`alt` 给出的内容会作为「建议写法」展示，而不是静默跳过（`ORA-DECODE` 就是这么处理含子查询的情况）。
 
 ## 已知限制
 
 - 不连接数据库、不执行 SQL，结果不能替代目标库实测。
 - 不保证语义完全等价，尤其日期精度、字符长度、NULL 处理、分页顺序。
 - 存储过程、触发器、动态 SQL 只识别提示，不改写。
-- 规则按高频场景挑选（v1 共 47 条），不是全集。
+- 规则按高频场景挑选（v1.1 共 49 条），不是全集。
 
 ## 部署
 
