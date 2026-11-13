@@ -342,6 +342,7 @@
     bind();
     els.ruleCountFooter.textContent = Converter.ruleCount();
     updateCharCount();
+    if (/[?&]high=1/.test(location.search)) els.onlyHigh.checked = true;
     // 支持 ?sample=my-ddl 直达某个样例，便于分享与截图
     var hit = (location.search || '').match(/[?&]sample=([\w-]+)/);
     if (hit) {
