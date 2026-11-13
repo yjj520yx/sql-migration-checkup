@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQL 迁移体检台 · Oracle / MySQL → 达梦</title>
+<meta name="description" content="把 Oracle、MySQL 的 SQL 与建表语句改成达梦可执行写法，逐条说明改了什么、为什么改、风险几级。纯前端，不连库、不上传数据。">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">DM</span>
+    <div>
+      <h1>SQL 迁移体检台</h1>
+      <p>Oracle / MySQL → 达梦，改哪了、为什么改、风险几级</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="pill">纯本地运行</span>
+    <span class="pill">不连库 · 不上传</span>
+  </div>
+</header>
+
+<main>
+  <section class="toolbar">
+    <div class="dir-switch" role="tablist" aria-label="转换方向">
+      <button class="dir-btn active" data-dir="oracle" role="tab" aria-selected="true">Oracle → 达梦</button>
+      <button class="dir-btn" data-dir="mysql" role="tab" aria-selected="false">MySQL → 达梦</button>
+    </div>
+    <div class="samples" id="samples">
+      <span class="samples-label">样例：</span>
+    </div>
+  </section>
+
+  <section class="card input-card">
+    <div class="card-head">
+      <h2>原始 SQL</h2>
+      <span class="meta" id="charCount">0 字符</span>
+    </div>
+    <textarea id="sqlInput" spellcheck="false" placeholder="粘贴 Oracle 或 MySQL 的 SQL / 建表语句，或点上方样例一键载入。&#10;&#10;例：SELECT NVL(salary, 0) FROM emp WHERE ROWNUM <= 10;"></textarea>
+    <div class="actions">
+      <button id="runBtn" class="primary">开始体检</button>
+      <button id="clearBtn" class="ghost">清空</button>
+      <button id="exportBtn" class="ghost" disabled>导出 Markdown</button>
+      <button id="rulesBtn" class="ghost">查看规则清单</button>
+      <span class="status" id="status">就绪</span>
+    </div>
+  </section>
+
+  <section class="summary" id="summary" hidden></section>
+  <div class="same-tip" id="sameTip" hidden></div>
+
+  <section class="card diff-card" id="diffSection" hidden>
+    <div class="card-head">
+      <h2>左右对照</h2>
+      <span class="meta">改写为建议稿，未处理项见下方清单</span>
+    </div>
+    <div class="diff-legend">
+      <span><i class="lg lg-del"></i>删除 / 原写法</span>
+      <span><i class="lg lg-add"></i>新增 / 改写后</span>
+      <span><i class="lg lg-warn"></i>需人工确认</span>
+    </div>
+    <div class="diff-grid">
+      <div class="diff-pane">
+        <div class="pane-title">原始<span id="leftCount"></span></div>
+        <div class="pane-scroll" id="paneLeft"></div>
+      </div>
+      <div class="diff-pane">
+        <div class="pane-title">达梦改写（建议稿）
+          <button id="copyBtn" class="mini">复制</button>
+        </div>
+        <div class="pane-scroll" id="paneRight"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card issues-card" id="issuesSection" hidden>
+    <div class="card-head">
+      <h2>问题清单</h2>
+      <div class="head-right">
+        <label class="switch"><input type="checkbox" id="onlyHigh"> 只看高危</label>
+        <span class="meta" id="issueCount"></span>
+      </div>
+    </div>
+    <div class="issue-list" id="issueList"></div>
+    <div class="empty-tip" id="noIssueTip" hidden>没有发现需要处理的问题。这通常意味着写法在达梦上基本通用，仍建议在目标库实测一次。</div>
+  </section>
+
+  <section class="card intro-card">
+    <h2>它怎么判断</h2>
+    <div class="intro-grid">
+      <div>
+        <h3>改写规则</h3>
+        <p>把<strong>语义确定、写法可替换</strong>的部分直接改掉，例如 <code>VARCHAR2</code> → <code>VARCHAR</code>、<code>LIMIT 100,20</code> → <code>LIMIT 20 OFFSET 100</code>。</p>
+      </div>
+      <div>
+        <h3>仅提示不硬改</h3>
+        <p>拿不准的<strong>只标注「需人工确认」并给建议</strong>，例如 <code>(+)</code> 外连接、<code>ON DUPLICATE KEY UPDATE</code>、<code>ENUM</code>。宁可少改，也不改错。</p>
+      </div>
+      <div>
+        <h3>风险分级</h3>
+        <p><span class="risk high">高</span> 语义或结构会变 · <span class="risk medium">中</span> 依赖版本/参数 · <span class="risk low">低</span> 写法统一、基本无风险。</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="known-limits">
+  <div class="kl-inner">
+    <strong>已知限制</strong>
+    <span>不连库、不执行 SQL；不保证语义完全等价；存储过程/触发器只识别不改写；规则覆盖有限，复杂写法请人工复核。</span>
+    <button id="klToggle" class="mini">详情</button>
+  </div>
+  <div class="kl-more" id="klMore" hidden>
+    <ul>
+      <li>转换结果用于迁移前的<strong>改造提示</strong>，不能替代在目标达梦库上的实测。</li>
+      <li>规则按「高频、可解释」挑选，v1 覆盖 <span id="ruleCountFooter">—</span> 条，不是全集。</li>
+      <li>所有 SQL 仅在浏览器内存中处理，不发送到任何服务器，也不写入磁盘。</li>
+      <li>涉及金额、时间、字符长度语义的改动，即使标为低风险，也建议回归测试。</li>
+    </ul>
+  </div>
+</footer>
+
+<div class="modal" id="rulesModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2>规则清单</h2>
+      <button id="modalClose" class="mini">关闭</button>
+    </div>
+    <div class="modal-body" id="rulesTable"></div>
+  </div>
+</div>
+
+<script src="rules.js"></script>
+<script src="samples.js"></script>
+<script src="converter.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
